@@ -1,10 +1,19 @@
-name: Build FakeMessage
+name: Build and Publish FakeMessage
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -20,8 +29,23 @@ jobs:
           cp FakeMessage/index.js dist/FakeMessage/index.js
           cp FakeMessage/manifest.json dist/FakeMessage/manifest.json
 
-      - name: Upload build
-        uses: actions/upload-artifact@v4
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: FakeMessage
-          path: dist/FakeMessage/
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
