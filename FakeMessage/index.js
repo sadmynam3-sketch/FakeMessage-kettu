@@ -1,232 +1,175 @@
-(function (vendetta) {
-    "use strict";
+vendetta => {
+    const { findByProps, findByStoreName } = vendetta.metro.common;
+    const { after } = vendetta.patcher;
+    const storage = vendetta.plugin.storage;
 
-    const pluginName = "FakeMessage";
+    const fakeMessages = storage.fakeMessages || {};
+    storage.fakeMessages = fakeMessages;
 
-    const logger = vendetta?.logger ?? console;
-    const metro = vendetta?.metro;
-    const patcher = vendetta?.patcher;
-    const storage = vendetta?.storage;
+    let unpatches = [];
 
-    let fakeMessages = [];
-    let unpatch = null;
-    let messageStore = null;
-
-    function log(...args) {
-        try {
-            (logger.log ?? console.log).call(logger, `[${pluginName}]`, ...args);
-        } catch {}
+    function makeId() {
+        return "fake-" + Date.now() + "-" +
+            Math.random().toString(36).slice(2, 9);
     }
 
-    function load() {
+    function getMessageStore() {
         try {
-            const raw = storage?.load?.("FakeMessage", "fakes");
+            return findByStoreName("MessageStore");
+        } catch (_) {}
 
-            if (Array.isArray(raw)) {
-                fakeMessages = raw;
-                return;
-            }
+        try {
+            return findByProps("getMessage", "getMessages");
+        } catch (_) {}
 
-            if (typeof raw === "string") {
-                const parsed = JSON.parse(raw);
-                if (Array.isArray(parsed)) fakeMessages = parsed;
-            }
-        } catch {
-            fakeMessages = [];
+        return null;
+    }
+
+    function addFakeMessage(message) {
+        if (!message || !message.channel_id) return;
+
+        if (!fakeMessages[message.channel_id]) {
+            fakeMessages[message.channel_id] = [];
         }
+
+        fakeMessages[message.channel_id].push(message);
+        storage.fakeMessages = fakeMessages;
     }
 
-    function save() {
-        try {
-            storage?.save?.("FakeMessage", "fakes", fakeMessages);
-        } catch {}
+    function getFakeMessage(channelId, messageId) {
+        const list = fakeMessages[channelId] || [];
+
+        for (const message of list) {
+            if (message.id === messageId) return message;
+        }
+
+        return null;
     }
 
-    function findMessageStore() {
-        try {
-            return (
-                metro?.findByStoreName?.("MessageStore") ??
-                metro?.findByProps?.("getMessages", "getMessage") ??
-                null
+    function getFakeMessages(channelId) {
+        return fakeMessages[channelId] || [];
+    }
+
+    function patchStore() {
+        const store = getMessageStore();
+
+        if (!store) {
+            console.log("[FakeMessage] MessageStore not found");
+            return;
+        }
+
+        if (typeof store.getMessage === "function") {
+            unpatches.push(
+                after(store, "getMessage", (_, args, result) => {
+                    if (result) return result;
+
+                    const channelId = args[0];
+                    const messageId = args[1];
+
+                    return getFakeMessage(channelId, messageId) || result;
+                })
             );
-        } catch {
-            return null;
         }
+
+        if (typeof store.getMessages === "function") {
+            unpatches.push(
+                after(store, "getMessages", (_, args, result) => {
+                    const channelId = args[0];
+
+                    if (!result) return result;
+
+                    const fakes = getFakeMessages(channelId);
+
+                    if (!fakes.length) return result;
+
+                    try {
+                        if (Array.isArray(result)) {
+                            return result.concat(fakes);
+                        }
+
+                        if (result._array && Array.isArray(result._array)) {
+                            result._array = result._array.concat(fakes);
+                            return result;
+                        }
+
+                        if (result.messages && Array.isArray(result.messages)) {
+                            result.messages = result.messages.concat(fakes);
+                            return result;
+                        }
+                    } catch (_) {}
+
+                    return result;
+                })
+            );
+        }
+
+        console.log("[FakeMessage] MessageStore patched");
     }
 
-    function getUser(id) {
-        try {
-            const users =
-                metro?.findByStoreName?.("UserStore") ??
-                metro?.findByProps?.("getUser", "getCurrentUser");
+    function createFakeMessage(channelId, author, content) {
+        const now = new Date().toISOString();
 
-            return users?.getUser?.(String(id)) ?? null;
-        } catch {
-            return null;
-        }
-    }
-
-    function createMessage(fake, original) {
-        const author = getUser(fake.authorId);
-
-        if (!author) return null;
-
-        const message = original
-            ? Object.create(Object.getPrototypeOf(original))
-            : {};
-
-        if (original) Object.assign(message, original);
-
-        Object.assign(message, {
-            id: String(fake.id),
-            channel_id: String(fake.channelId),
-            author,
-            content: String(fake.content ?? ""),
-            timestamp: new Date(Number(fake.timestamp) || Date.now()),
-            editedTimestamp: null,
-            nonce: String(fake.id),
-            type: 0,
-            flags: 0,
-            pinned: false,
+        const message = {
+            id: makeId(),
+            channel_id: String(channelId),
+            guild_id: null,
+            author: {
+                id: String(author?.id || "0"),
+                username: author?.username || "Fake User",
+                discriminator: author?.discriminator || "0000",
+                avatar: author?.avatar || null,
+                global_name: author?.global_name || author?.username || "Fake User"
+            },
+            content: String(content || ""),
+            timestamp: now,
+            edited_timestamp: null,
             tts: false,
+            mention_everyone: false,
+            mentions: [],
+            mention_roles: [],
             attachments: [],
             embeds: [],
-            reactions: [],
-            components: [],
-            stickers: [],
-            mentions: [],
-            mentionRoles: [],
-            mentionChannels: [],
-            _isFake: true
-        });
+            pinned: false,
+            type: 0,
+            flags: 0
+        };
+
+        addFakeMessage(message);
 
         return message;
     }
 
-    function getArray(collection) {
-        try {
-            if (typeof collection?.toArray === "function") {
-                return collection.toArray();
-            }
-
-            if (Array.isArray(collection?._array)) {
-                return collection._array.slice();
-            }
-        } catch {}
-
-        return [];
-    }
-
-    function inject(collection, channelId) {
-        if (!collection) return collection;
-
-        const matching = fakeMessages.filter(
-            x => String(x.channelId) === String(channelId)
-        );
-
-        if (!matching.length) return collection;
-
-        const original = getArray(collection);
-
-        const fakes = matching
-            .map(fake => createMessage(fake, original[0]))
-            .filter(Boolean);
-
-        const combined = [...original, ...fakes].sort(
-            (a, b) =>
-                new Date(a.timestamp).getTime() -
-                new Date(b.timestamp).getTime()
-        );
-
-        try {
-            if (Array.isArray(collection._array)) {
-                collection._array = combined;
-            }
-
-            if (typeof collection.toArray === "function") {
-                collection.toArray = () => combined;
-            }
-        } catch {}
-
-        return collection;
-    }
-
-    function addFake(channelId, authorId, content) {
-        if (!channelId || !authorId || !content) {
-            return false;
-        }
-
-        fakeMessages.push({
-            id:
-                `fake-${Date.now()}-` +
-                Math.random().toString(36).slice(2, 8),
-            channelId: String(channelId),
-            authorId: String(authorId),
-            content: String(content),
-            timestamp: Date.now()
-        });
-
-        if (fakeMessages.length > 200) {
-            fakeMessages = fakeMessages.slice(-200);
-        }
-
-        save();
-        return true;
-    }
-
     function clearFakeMessages() {
-        fakeMessages = [];
-        save();
-    }
-
-    function start() {
-        load();
-
-        messageStore = findMessageStore();
-
-        if (!messageStore) {
-            log("MessageStore was not found.");
-            return;
+        for (const key of Object.keys(fakeMessages)) {
+            delete fakeMessages[key];
         }
 
-        if (!patcher?.after) {
-            log("Vendetta patcher was not found.");
-            return;
-        }
-
-        try {
-            unpatch = patcher.after(
-                pluginName,
-                messageStore,
-                "getMessages",
-                (args, result) => inject(result, args?.[0])
-            );
-
-            log("Loaded.");
-        } catch (error) {
-            log("Failed to patch MessageStore:", error);
-        }
-    }
-
-    function stop() {
-        try {
-            unpatch?.();
-        } catch {}
-
-        unpatch = null;
-        messageStore = null;
+        storage.fakeMessages = {};
     }
 
     return {
-        name: pluginName,
-        description:
-            "Creates client-side fake messages visible only on this device.",
-        onLoad: start,
-        onUnload: stop,
+        onLoad() {
+            patchStore();
 
-        // Also expose these for testing.
-        addFake,
-        clearFakeMessages,
-        getFakeMessages: () => fakeMessages.slice()
+            console.log("[FakeMessage] Loaded");
+        },
+
+        onUnload() {
+            for (const unpatch of unpatches) {
+                try {
+                    unpatch();
+                } catch (_) {}
+            }
+
+            unpatches = [];
+
+            console.log("[FakeMessage] Unloaded");
+        },
+
+        createFakeMessage,
+        addFakeMessage,
+        getFakeMessage,
+        getFakeMessages,
+        clearFakeMessages
     };
-})(vendetta)
+}
