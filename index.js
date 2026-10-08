@@ -1,7 +1,7 @@
 /* FakeMessage - Kettu/Vendetta-family client-only plugin
  * Self-contained runtime JS. No Vencord imports.
  */
-(() => {
+export default (() => {
   "use strict";
 
   const V = globalThis.vendetta || globalThis.bunny || globalThis.kettu;
