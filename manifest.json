@@ -4,5 +4,5 @@
   "authors": [{ "name": "Elioflex", "id": "0" }],
   "main": "index.js",
   "vendetta": { "icon": "ic_message_edit" },
-  "version": "1.1.0"
+  "version": "1.2.0"
 }
