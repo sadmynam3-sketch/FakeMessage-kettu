@@ -1,88 +1,90 @@
-(() => {
+(function (vendetta) {
     "use strict";
 
     const pluginName = "FakeMessage";
-    const bunny = typeof globalThis.bunny !== "undefined" ? globalThis.bunny : null;
-    const vendetta = typeof globalThis.vendetta !== "undefined" ? globalThis.vendetta : null;
 
-    const logger =
-        bunny?.plugin?.logger ??
-        vendetta?.logger ??
-        console;
-
-    const storage =
-        vendetta?.plugin?.storage ??
-        bunny?.plugin?.storage ??
-        {};
-
-    const metro =
-        bunny?.metro ??
-        vendetta?.metro ??
-        null;
+    const logger = vendetta?.logger ?? console;
+    const metro = vendetta?.metro;
+    const patcher = vendetta?.patcher;
+    const storage = vendetta?.storage;
 
     let fakeMessages = [];
-    let unpatchMessages = null;
+    let unpatch = null;
     let messageStore = null;
 
     function log(...args) {
-        try { (logger.log ?? logger.info ?? console.log).call(logger, `[${pluginName}]`, ...args); }
-        catch {}
+        try {
+            (logger.log ?? console.log).call(logger, `[${pluginName}]`, ...args);
+        } catch {}
     }
 
     function load() {
         try {
-            const raw = storage.fakes;
-            const value = typeof raw === "string" ? JSON.parse(raw) : raw;
-            if (Array.isArray(value)) fakeMessages = value;
+            const raw = storage?.load?.("FakeMessage", "fakes");
+
+            if (Array.isArray(raw)) {
+                fakeMessages = raw;
+                return;
+            }
+
+            if (typeof raw === "string") {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) fakeMessages = parsed;
+            }
         } catch {
             fakeMessages = [];
         }
     }
 
     function save() {
-        try { storage.fakes = JSON.stringify(fakeMessages); } catch {}
-    }
-
-    function findStore() {
-        return metro?.findByStoreName?.("MessageStore") ??
-            metro?.findByProps?.("getMessages", "getMessage") ??
-            null;
-    }
-
-    function currentUser() {
         try {
-            const store =
-                metro?.findByStoreName?.("UserStore") ??
-                metro?.common?.stores?.UserStore;
-            return store?.getCurrentUser?.() ?? null;
-        } catch { return null; }
+            storage?.save?.("FakeMessage", "fakes", fakeMessages);
+        } catch {}
+    }
+
+    function findMessageStore() {
+        try {
+            return (
+                metro?.findByStoreName?.("MessageStore") ??
+                metro?.findByProps?.("getMessages", "getMessage") ??
+                null
+            );
+        } catch {
+            return null;
+        }
     }
 
     function getUser(id) {
         try {
-            const store =
+            const users =
                 metro?.findByStoreName?.("UserStore") ??
-                metro?.common?.stores?.UserStore;
-            return store?.getUser?.(id) ?? null;
-        } catch { return null; }
+                metro?.findByProps?.("getUser", "getCurrentUser");
+
+            return users?.getUser?.(String(id)) ?? null;
+        } catch {
+            return null;
+        }
     }
 
-    function makeMessage(fake, base) {
-        const author = getUser(fake.authorId) ?? fake.author;
+    function createMessage(fake, original) {
+        const author = getUser(fake.authorId);
+
         if (!author) return null;
 
-        const msg = base ? Object.create(Object.getPrototypeOf(base)) : {};
-        if (base) Object.assign(msg, base);
+        const message = original
+            ? Object.create(Object.getPrototypeOf(original))
+            : {};
 
-        Object.assign(msg, {
-            id: fake.id,
-            channel_id: fake.channelId,
+        if (original) Object.assign(message, original);
+
+        Object.assign(message, {
+            id: String(fake.id),
+            channel_id: String(fake.channelId),
             author,
             content: String(fake.content ?? ""),
             timestamp: new Date(Number(fake.timestamp) || Date.now()),
             editedTimestamp: null,
-            nonce: fake.id,
-            state: "SENT",
+            nonce: String(fake.id),
             type: 0,
             flags: 0,
             pinned: false,
@@ -98,110 +100,133 @@
             _isFake: true
         });
 
-        if (typeof msg.getChannelId !== "function")
-            msg.getChannelId = () => fake.channelId;
-        if (typeof msg.hasFlag !== "function")
-            msg.hasFlag = () => false;
-        if (typeof msg.isEdited !== "function")
-            msg.isEdited = () => false;
-
-        return msg;
+        return message;
     }
 
-    function wrap(collection, channelId) {
-        const items = fakeMessages.filter(x => String(x.channelId) === String(channelId));
-        if (!items.length || !collection) return collection;
-
-        const base = (() => {
-            try {
-                if (Array.isArray(collection._array)) return collection._array.slice();
-                if (typeof collection.toArray === "function") return collection.toArray();
-            } catch {}
-            return [];
-        })();
-
-        const fake = items.map(x => makeMessage(x, base.find(m => m && !m._isFake))).filter(Boolean);
-        const combined = () =>
-            [...base.filter(x => !x?._isFake), ...fake]
-                .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-        return new Proxy(collection, {
-            get(target, prop, receiver) {
-                if (prop === "_array" || prop === "toArray") return combined;
-                if (prop === Symbol.iterator) return () => combined()[Symbol.iterator]();
-                if (prop === "size" || prop === "length") return combined().length;
-                if (prop === "get") return id => {
-                    const f = items.find(x => String(x.id) === String(id));
-                    return f ? makeMessage(f, base[0]) : target.get?.(id);
-                };
-                return Reflect.get(target, prop, receiver);
+    function getArray(collection) {
+        try {
+            if (typeof collection?.toArray === "function") {
+                return collection.toArray();
             }
-        });
+
+            if (Array.isArray(collection?._array)) {
+                return collection._array.slice();
+            }
+        } catch {}
+
+        return [];
     }
 
-    function install() {
-        messageStore = findStore();
-        const patcher = bunny?.api?.patcher ?? vendetta?.patcher;
+    function inject(collection, channelId) {
+        if (!collection) return collection;
 
-        if (!messageStore || !patcher?.instead) {
-            log("MessageStore/patcher API not available; plugin loaded but cannot inject messages.");
-            return;
-        }
+        const matching = fakeMessages.filter(
+            x => String(x.channelId) === String(channelId)
+        );
 
-        if (messageStore.getMessages) {
-            unpatchMessages = patcher.instead(
-                "getMessages",
-                messageStore,
-                (args, original) => wrap(original(...args), args?.[0])
-            );
-        }
+        if (!matching.length) return collection;
 
-        log("Loaded.");
-    }
+        const original = getArray(collection);
 
-    function uninstall() {
-        try { unpatchMessages?.(); } catch {}
-        unpatchMessages = null;
-        messageStore = null;
+        const fakes = matching
+            .map(fake => createMessage(fake, original[0]))
+            .filter(Boolean);
+
+        const combined = [...original, ...fakes].sort(
+            (a, b) =>
+                new Date(a.timestamp).getTime() -
+                new Date(b.timestamp).getTime()
+        );
+
+        try {
+            if (Array.isArray(collection._array)) {
+                collection._array = combined;
+            }
+
+            if (typeof collection.toArray === "function") {
+                collection.toArray = () => combined;
+            }
+        } catch {}
+
+        return collection;
     }
 
     function addFake(channelId, authorId, content) {
-        if (!channelId || !authorId || !content) return false;
+        if (!channelId || !authorId || !content) {
+            return false;
+        }
 
         fakeMessages.push({
-            id: `fakemessage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            id:
+                `fake-${Date.now()}-` +
+                Math.random().toString(36).slice(2, 8),
             channelId: String(channelId),
             authorId: String(authorId),
             content: String(content),
             timestamp: Date.now()
         });
 
-        if (fakeMessages.length > 200) fakeMessages = fakeMessages.slice(-200);
+        if (fakeMessages.length > 200) {
+            fakeMessages = fakeMessages.slice(-200);
+        }
+
         save();
-        try { messageStore?.emitChange?.(); } catch {}
         return true;
     }
 
-    // Expose a tiny API for testing from Kettu's JS console.
-    globalThis.FakeMessage = {
-        add: addFake,
-        clear() {
-            fakeMessages = [];
-            save();
-            try { messageStore?.emitChange?.(); } catch {}
-        },
-        list() { return fakeMessages.slice(); }
-    };
+    function clearFakeMessages() {
+        fakeMessages = [];
+        save();
+    }
 
-    load();
+    function start() {
+        load();
 
-    // External-plugin loaders commonly execute the file directly.
-    // Returning an object here lets compatible loaders register lifecycle methods.
+        messageStore = findMessageStore();
+
+        if (!messageStore) {
+            log("MessageStore was not found.");
+            return;
+        }
+
+        if (!patcher?.after) {
+            log("Vendetta patcher was not found.");
+            return;
+        }
+
+        try {
+            unpatch = patcher.after(
+                pluginName,
+                messageStore,
+                "getMessages",
+                (args, result) => inject(result, args?.[0])
+            );
+
+            log("Loaded.");
+        } catch (error) {
+            log("Failed to patch MessageStore:", error);
+        }
+    }
+
+    function stop() {
+        try {
+            unpatch?.();
+        } catch {}
+
+        unpatch = null;
+        messageStore = null;
+    }
+
     return {
         name: pluginName,
-        start: install,
-        stop: uninstall,
-        onLoad: install,
-        onUnload: uninstall
+        description:
+            "Creates client-side fake messages visible only on this device.",
+        onLoad: start,
+        onUnload: stop,
+
+        // Also expose these for testing.
+        addFake,
+        clearFakeMessages,
+        getFakeMessages: () => fakeMessages.slice()
     };
-})()
+})(vendetta)
