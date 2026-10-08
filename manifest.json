@@ -1,0 +1,8 @@
+{
+  "name": "FakeMessage",
+  "description": "Create fake client-side messages and call logs from any user. Only you can see them.",
+  "authors": [{ "name": "Elioflex", "id": "0" }],
+  "main": "index.js",
+  "vendetta": { "icon": "ic_message_edit" },
+  "version": "1.1.0"
+}
