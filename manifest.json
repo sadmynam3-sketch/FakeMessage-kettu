@@ -1,0 +1,15 @@
+{
+  "name": "FakeMessage",
+  "description": "Create client-side fake messages and call logs visible only in your Discord client.",
+  "authors": [
+    {
+      "name": "sadmynam3-sketch",
+      "id": "293040508"
+    }
+  ],
+  "main": "index.js",
+  "vendetta": {
+    "icon": "ic_message_edit"
+  },
+  "version": "1.0.0"
+}
