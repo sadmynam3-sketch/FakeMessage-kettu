@@ -1,0 +1,49 @@
+name: Build Kettu plugin
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build plugin
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const path = require('path');
+
+          const srcDir = path.join('FakeMessage');
+          const outDir = path.join('dist', 'FakeMessage');
+          fs.mkdirSync(outDir, { recursive: true });
+
+          let js = fs.readFileSync(path.join(srcDir, 'index.js'), 'utf8');
+          // The old file was written as an ES-module default export. Kettu's
+          // external-plugin loader expects the file to evaluate to a plugin object.
+          js = js.replace(/^\\s*export\\s+default\\s+/m, '');
+
+          const built = `(function(){\n"use strict";\ntry {\n  return (${js.trim()});\n} catch (e) {\n  try { console.error("[FakeMessage] bundle error", e); } catch (_) {}\n  return { onLoad(){}, onUnload(){} };\n}\n})()`;
+
+          fs.writeFileSync(path.join(outDir, 'index.js'), built);
+
+          const manifest = JSON.parse(fs.readFileSync(path.join(srcDir, 'manifest.json'), 'utf8'));
+          manifest.main = 'index.js';
+          manifest.hash = crypto.createHash('sha256').update(built).digest('hex').slice(0, 16);
+          fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+          NODE
+
+      - name: Commit built plugin
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist/FakeMessage
+          git diff --cached --quiet || git commit -m "build FakeMessage plugin [skip ci]"
+          git push
